@@ -199,22 +199,35 @@ public sealed class OllamaAgent : IOllamaAgent, IDisposable
             Services.AppLog.Shared.Write("Info", source,
                 $"Response after {clock.ElapsedMilliseconds} ms; done_reason={doneReason}; output tokens={tokens}",
                 responseText);
-            if (!root.TryGetProperty("message", out var message) ||
-                !message.TryGetProperty("content", out var content))
-                throw new InvalidDataException("Ollama's response did not contain message.content.");
+            if (!root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("Ollama's response did not contain a message object.");
 
-            var json = StripCodeFence(content.GetString() ?? "");
+            var content = message.TryGetProperty("content", out var contentValue) &&
+                contentValue.ValueKind == JsonValueKind.String ? contentValue.GetString() : null;
+            var usedFallback = string.IsNullOrWhiteSpace(content);
+            if (usedFallback)
+            {
+                if (!string.Equals(doneReason, "stop", StringComparison.Ordinal))
+                    throw new InvalidDataException($"Ollama returned no final content (done_reason={doneReason}); refusing an unfinished fallback.");
+                content = message.TryGetProperty("thinking", out var thinking) &&
+                    thinking.ValueKind == JsonValueKind.String ? thinking.GetString() : null;
+                if (string.IsNullOrWhiteSpace(content))
+                    throw new InvalidDataException("Ollama returned no content or structured fallback response.");
+            }
+
+            // Parse the entire field. Never extract fragments from free-form reasoning.
+            var json = StripCodeFence(content!);
             using var parsed = JsonDocument.Parse(json);
-            if (parsed.RootElement.ValueKind != JsonValueKind.Object)
-                throw new InvalidDataException("Expected a JSON object from the model.");
-
-            // Diagnose missing stage fields before the downstream typed parser runs.
-            var required = profile.EndsWith(" / perception", StringComparison.Ordinal)
-                ? new[] { "screen_type", "summary", "visible_text", "confidence", "dialogue_complete", "change_summary" }
-                : new[] { "outcome", "goal", "task", "actions", "memories" };
-            foreach (var field in required)
-                if (!parsed.RootElement.TryGetProperty(field, out _))
-                    throw new InvalidDataException($"Model JSON is missing required field '{field}'.");
+            var isPerception = profile.EndsWith(" / perception", StringComparison.Ordinal);
+            var compatibility = ModelCompatibility.Resolve(model);
+            var maxActions = Math.Clamp(Math.Min(settings.MaxActionsPerTurn, compatibility.MaximumActions), 1, 4);
+            var schema = JsonSerializer.SerializeToElement(isPerception
+                ? BuildPerceptionSchema()
+                : BuildPlannerSchema(maxActions));
+            ValidateModelJson(parsed.RootElement, schema, "$");
+            if (usedFallback)
+                Services.AppLog.Shared.Write("Info", source,
+                    "Accepted complete schema-valid JSON from thinking because content was empty.");
             return new OllamaResult(json, ReadMetrics(root, model, profile, json));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -228,6 +241,59 @@ public sealed class OllamaAgent : IOllamaAgent, IDisposable
                 $"Request or JSON validation failed after {clock.ElapsedMilliseconds} ms: {ex.Message}",
                 $"{ex}\n\nFull Ollama response (including completion reason when supplied):\n{responseText}");
             throw;
+        }
+    }
+
+    // Validates the subset of JSON Schema used by our own request schemas.
+    private static void ValidateModelJson(JsonElement value, JsonElement schema, string path)
+    {
+        var type = schema.GetProperty("type").GetString();
+        var validType = type switch
+        {
+            "object" => value.ValueKind == JsonValueKind.Object,
+            "array" => value.ValueKind == JsonValueKind.Array,
+            "string" => value.ValueKind == JsonValueKind.String,
+            "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+            "number" => value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) && double.IsFinite(number),
+            "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out _),
+            _ => false
+        };
+        if (!validType) throw new InvalidDataException($"Model JSON {path}: expected {type}.");
+
+        if (schema.TryGetProperty("enum", out var choices) &&
+            !choices.EnumerateArray().Any(choice => choice.GetString() == value.GetString()))
+            throw new InvalidDataException($"Model JSON {path}: unsupported enum value.");
+
+        if (type == "object")
+        {
+            if (schema.TryGetProperty("required", out var required))
+                foreach (var field in required.EnumerateArray())
+                    if (!value.TryGetProperty(field.GetString()!, out _))
+                        throw new InvalidDataException($"Model JSON {path}: missing '{field.GetString()}'.");
+            if (schema.TryGetProperty("properties", out var properties))
+                foreach (var field in properties.EnumerateObject())
+                    if (value.TryGetProperty(field.Name, out var child))
+                        ValidateModelJson(child, field.Value, $"{path}.{field.Name}");
+        }
+        else if (type == "array")
+        {
+            var count = value.GetArrayLength();
+            if ((schema.TryGetProperty("minItems", out var minItems) && count < minItems.GetInt32()) ||
+                (schema.TryGetProperty("maxItems", out var maxItems) && count > maxItems.GetInt32()))
+                throw new InvalidDataException($"Model JSON {path}: invalid array length.");
+            if (schema.TryGetProperty("items", out var items))
+            {
+                var index = 0;
+                foreach (var child in value.EnumerateArray())
+                    ValidateModelJson(child, items, $"{path}[{index++}]");
+            }
+        }
+        else if (type is "number" or "integer")
+        {
+            var numericValue = value.GetDouble();
+            if ((schema.TryGetProperty("minimum", out var minimum) && numericValue < minimum.GetDouble()) ||
+                (schema.TryGetProperty("maximum", out var maximum) && numericValue > maximum.GetDouble()))
+                throw new InvalidDataException($"Model JSON {path}: number outside allowed range.");
         }
     }
 
