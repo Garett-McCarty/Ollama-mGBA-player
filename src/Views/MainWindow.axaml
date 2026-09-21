@@ -1,0 +1,47 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="using:OllamaNetGB.Views"
+        mc:Ignorable="d"
+        d:DesignWidth="1100"
+        d:DesignHeight="700"
+        x:Class="OllamaNetGB.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        x:CompileBindings="True"
+        Width="1100"
+        Height="700"
+        MinWidth="820"
+        MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource AppBackgroundBrush}"
+        Foreground="{DynamicResource AppTextBrush}"
+        Title="Ollama mGBA Player">
+
+    <Grid RowDefinitions="Auto,*">
+        <Border Grid.Row="0" Padding="12,8"
+                Background="{DynamicResource AppNavigationBrush}"
+                BorderBrush="{DynamicResource AppBorderBrush}"
+                BorderThickness="0,0,0,1">
+            <Grid ColumnDefinitions="Auto,Auto,*">
+                <Button Grid.Column="0"
+                        Content="Player"
+                        Command="{Binding ShowGameViewCommand}"
+                        Padding="16,7" />
+                <Button Grid.Column="1"
+                        Content="Settings"
+                        Command="{Binding ShowSettingsCommand}"
+                        Margin="8,0,0,0"
+                        Padding="16,7" />
+                <TextBlock Grid.Column="2"
+                           Text="Ollama mGBA Player"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Center"
+                           FontSize="18"
+                           FontWeight="SemiBold" />
+            </Grid>
+        </Border>
+
+        <ContentControl Grid.Row="1" Content="{Binding CurrentPage}" />
+    </Grid>
+</Window>

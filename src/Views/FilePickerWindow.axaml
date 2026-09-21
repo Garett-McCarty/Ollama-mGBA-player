@@ -1,0 +1,40 @@
+<Window
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="using:OllamaNetGB.Views"
+    x:Class="OllamaNetGB.Views.FilePickerWindow"
+    Width="760"
+    Height="520"
+    MinWidth="560"
+    MinHeight="360"
+    Background="{DynamicResource AppBackgroundBrush}"
+    Foreground="{DynamicResource AppTextBrush}"
+    WindowStartupLocation="CenterOwner"
+    ShowInTaskbar="False">
+
+  <Grid RowDefinitions="Auto,*,Auto" Margin="16">
+    <Grid Grid.Row="0" ColumnDefinitions="Auto,*" Margin="0,0,0,10">
+      <Button Grid.Column="0" Content="Up" Click="Up_Click" Margin="0,0,8,0"/>
+      <TextBox x:Name="PathBox" Grid.Column="1" KeyDown="PathBox_KeyDown"/>
+    </Grid>
+
+    <ListBox x:Name="EntriesList"
+             Grid.Row="1"
+             DoubleTapped="EntriesList_DoubleTapped">
+      <ListBox.ItemTemplate>
+        <DataTemplate x:DataType="views:FilePickerEntry">
+          <TextBlock Text="{Binding DisplayName}" Padding="4"/>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto" Margin="0,12,0,0">
+      <TextBlock Grid.Column="0"
+                 Text="Double-click a folder to open it, or select a file."
+                 VerticalAlignment="Center"
+                 Foreground="{DynamicResource AppTextSecondaryBrush}"/>
+      <Button Grid.Column="1" Content="Cancel" Click="Cancel_Click" Margin="0,0,8,0"/>
+      <Button Grid.Column="2" Content="Select" Click="Select_Click" Classes="accent"/>
+    </Grid>
+  </Grid>
+</Window>

@@ -1,0 +1,155 @@
+<UserControl
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:OllamaNetGB.Views"
+    x:Class="OllamaNetGB.Views.SettingsView"
+    x:DataType="vm:SettingsViewModel"
+    x:CompileBindings="True"
+    Background="{DynamicResource AppBackgroundBrush}">
+    <UserControl.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="0,0,12,0"/>
+    </Style>
+    <Style Selector="TextBlock.status">
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="8,0,0,0"/>
+      <Setter Property="Foreground" Value="{DynamicResource AppTextSecondaryBrush}"/>
+    </Style>
+  </UserControl.Styles>
+
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="12" MaxWidth="900">
+
+      <TextBlock Text="Emulator" FontSize="18" FontWeight="SemiBold"/>
+
+      <Grid ColumnDefinitions="160,*,Auto,Auto">
+        <TextBlock Grid.Column="0" Text="mGBA AppImage" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding MgbaBinaryPath}"/>
+        <Button    Grid.Column="2" Content="Browse…" Command="{Binding BrowseMgbaBinaryCommand}" Margin="6,0"/>
+        <Button    Grid.Column="3" Content="Test"    Command="{Binding TestMgbaBinaryCommand}"/>
+      </Grid>
+      <TextBlock Text="{Binding MgbaBinaryStatus}" Classes="status"/>
+
+      <Grid ColumnDefinitions="160,*,Auto,Auto">
+        <TextBlock Grid.Column="0" Text="mGBA-http binary" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding MgbaHttpBinaryPath}"/>
+        <Button    Grid.Column="2" Content="Browse…" Command="{Binding BrowseMgbaHttpBinaryCommand}" Margin="6,0"/>
+        <Button    Grid.Column="3" Content="Test"    Command="{Binding TestMgbaHttpBinaryCommand}"/>
+      </Grid>
+      <TextBlock Text="{Binding MgbaHttpBinaryStatus}" Classes="status"/>
+
+      <Grid ColumnDefinitions="160,*,Auto,Auto">
+        <TextBlock Grid.Column="0" Text="Socket Lua script" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding MgbaSocketLuaPath}"/>
+        <Button    Grid.Column="2" Content="Browse…" Command="{Binding BrowseLuaScriptCommand}" Margin="6,0"/>
+        <Button    Grid.Column="3" Content="Test"    Command="{Binding TestLuaScriptCommand}"/>
+      </Grid>
+      <TextBlock Text="{Binding MgbaSocketLuaStatus}" Classes="status"/>
+
+      <Grid ColumnDefinitions="160,*,Auto">
+        <TextBlock Grid.Column="0" Text="mGBA-http URL" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding MgbaHttpBaseUrl}"/>
+        <Button    Grid.Column="2" Content="Test" Command="{Binding TestMgbaHttpCommand}"/>
+      </Grid>
+      <TextBlock Text="{Binding MgbaHttpStatus}" Classes="status"/>
+
+      <Separator Margin="0,12"/>
+
+      <TextBlock Text="AI" FontSize="18" FontWeight="SemiBold"/>
+
+      <Grid ColumnDefinitions="160,*,Auto">
+        <TextBlock Grid.Column="0" Text="Ollama URL" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding OllamaBaseUri}"/>
+        <Button    Grid.Column="2" Content="Test" Command="{Binding TestOllamaCommand}"/>
+      </Grid>
+      <TextBlock Text="{Binding OllamaStatus}" Classes="status"/>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Model" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding OllamaModel}"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Session goal" Classes="label"
+                   VerticalAlignment="Top" Margin="0,8,12,0"/>
+        <TextBox Grid.Column="1"
+                 Text="{Binding SessionGoal}"
+                 AcceptsReturn="True"
+                 TextWrapping="Wrap"
+                 MinHeight="72"
+                 PlaceholderText="What should the agent accomplish?"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Game prompt" Classes="label"
+                   VerticalAlignment="Top" Margin="0,8,12,0"/>
+        <TextBox Grid.Column="1"
+                 Text="{Binding GamePrompt}"
+                 AcceptsReturn="True"
+                 TextWrapping="Wrap"
+                 MinHeight="90"
+                 PlaceholderText="Optional game-specific mechanics or constraints"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Frame interval (ms)" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding FrameIntervalMs}"
+                       Minimum="100" Maximum="10000" Increment="100"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Actions remembered" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding DecisionHistoryCount}"
+                       Minimum="0" Maximum="30" Increment="1"/>
+      </Grid>
+
+      <Separator Margin="0,12"/>
+
+      <TextBlock Text="Memory" FontSize="18" FontWeight="SemiBold"/>
+
+      <Grid ColumnDefinitions="160,*,Auto">
+        <TextBlock Grid.Column="0" Text="Neo4j URI" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding Neo4jUri}"/>
+        <Button    Grid.Column="2" Content="Test" Command="{Binding TestNeo4jCommand}"/>
+      </Grid>
+      <TextBlock Text="{Binding Neo4jStatus}" Classes="status"/>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="User" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding Neo4jUser}"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Password" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding Neo4jPassword}"
+                   PasswordChar="•"/>
+      </Grid>
+
+      <Separator Margin="0,12"/>
+
+      <TextBlock Text="Game" FontSize="18" FontWeight="SemiBold"/>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Game ID" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding GameId}"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*,Auto">
+        <TextBlock Grid.Column="0" Text="ROM" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding RomPath}"/>
+        <Button    Grid.Column="2" Content="Browse…" Command="{Binding BrowseRomCommand}"/>
+      </Grid>
+
+      <Separator Margin="0,12"/>
+
+      <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right">
+        <TextBlock Text="{Binding SaveStatus}" Classes="status"
+                   VerticalAlignment="Center"/>
+        <Button Content="Save" Command="{Binding SaveCommand}"
+                Classes="accent" Padding="20,8"/>
+      </StackPanel>
+
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

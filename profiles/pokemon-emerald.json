@@ -1,0 +1,19 @@
+{
+	"gameId": "pokemon-emerald",
+	"displayName": "Pokémon Emerald",
+	"prompt": "This is a turn-based creature-battling adventure. Read dialogue, explore methodically, remember landmarks, prepare before difficult encounters, and treat returning to a recovery location after combat as a likely failure rather than progress.",
+	"knowledge": [
+		{
+			"topic": "Exploration",
+			"content": "Progress commonly requires speaking with characters, entering buildings, following routes, and revisiting blocked paths after gaining abilities or completing story events."
+		},
+		{
+			"topic": "Combat",
+			"content": "Combat is menu-driven. Avoid repeating an ineffective selection; monitor health, use recovery when necessary, and remember strategies that succeed against recurring opponents."
+		},
+		{
+			"topic": "Failure",
+			"content": "If the party is defeated, the game generally returns the player to a recovery location. Record the failed encounter and change preparation or strategy before retrying."
+		}
+	]
+}

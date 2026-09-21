@@ -1,0 +1,39 @@
+<UserControl
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:OllamaNetGB.Views"
+    x:Class="OllamaNetGB.Views.EmulatorView"
+    x:DataType="vm:EmulatorViewModel"
+    x:CompileBindings="True">
+
+    <Grid RowDefinitions="*,Auto">
+
+        <Border Background="{DynamicResource AppSurfaceBrush}"
+                BorderBrush="{DynamicResource AppBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="12">
+
+            <!-- A logical 240 × 160 canvas preserves GBA proportions. -->
+            <Viewbox Stretch="Uniform">
+                <Grid Width="240" Height="160"
+                      Background="Black">
+
+                    <TextBlock Text="GBA"
+                               Foreground="{DynamicResource AppTextSecondaryBrush}"
+                               FontSize="20"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center" />
+
+                    <Image Source="{Binding Frame}"
+                           Stretch="Fill"
+                           RenderOptions.BitmapInterpolationMode="None" />
+                </Grid>
+            </Viewbox>
+        </Border>
+
+        <TextBlock Grid.Row="1"
+                   Margin="0,8,0,0"
+                   Text="{Binding Status}" />
+    </Grid>
+</UserControl>
