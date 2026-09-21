@@ -1,0 +1,27 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:OllamaNetGB.Views"
+             xmlns:services="using:OllamaNetGB.Services"
+             x:Class="OllamaNetGB.Views.LogView" x:DataType="vm:LogViewModel"
+             x:CompileBindings="True">
+  <Grid Margin="16" RowDefinitions="Auto,Auto,2*,3*,Auto">
+    <StackPanel Orientation="Horizontal" Spacing="16">
+      <CheckBox Content="Pause live updates" IsChecked="{Binding IsPaused}"/>
+      <CheckBox Content="Errors only" IsChecked="{Binding ErrorsOnly}"/>
+      <Button Content="Refresh" Command="{Binding RefreshCommand}"/>
+      <Button Content="Copy selected" Click="CopySelected"/>
+    </StackPanel>
+    <TextBlock Grid.Row="1" Text="{Binding StorageStatus}" TextWrapping="Wrap" Margin="0,8"/>
+    <ListBox Grid.Row="2" ItemsSource="{Binding Entries}" SelectedItem="{Binding SelectedEntry, Mode=TwoWay}">
+      <ListBox.ItemTemplate>
+        <DataTemplate x:DataType="services:LogEntry">
+          <TextBlock Text="{Binding Summary}" TextWrapping="Wrap"/>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+    <TextBox Grid.Row="3" Text="{Binding SelectedText, Mode=OneWay}"
+             IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+             ScrollViewer.VerticalScrollBarVisibility="Auto" Margin="0,12,0,0"/>
+    <TextBlock Grid.Row="4" Text="{Binding CopyStatus}" TextWrapping="Wrap" Margin="0,8"/>
+  </Grid>
+</UserControl>

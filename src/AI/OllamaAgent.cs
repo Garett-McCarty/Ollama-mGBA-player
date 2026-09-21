@@ -178,26 +178,57 @@ public sealed class OllamaAgent : IOllamaAgent, IDisposable
         CancellationToken cancellationToken)
     {
         var settings = _settings.Current;
-        using var response = await _http.PostAsJsonAsync(
-            BuildUrl(settings.OllamaBaseUri, "/api/chat"), request, cancellationToken);
-        var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        var requestId = Guid.NewGuid().ToString("N")[..8];
+        var source = $"Ollama / {profile} / {model} / {requestId}";
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var responseText = "";
+        Services.AppLog.Shared.Write("Info", source, "Request started");
+        try
         {
-            Console.Error.WriteLine(
-                $"[{DateTimeOffset.Now:O}] Ollama model '{model}' HTTP {(int)response.StatusCode} {response.StatusCode}\n{responseText}");
-            throw new HttpRequestException(
-                $"Ollama model '{model}' returned {(int)response.StatusCode} {response.StatusCode}: {Trim(responseText, 400)}");
+            using var response = await _http.PostAsJsonAsync(
+                BuildUrl(settings.OllamaBaseUri, "/api/chat"), request, cancellationToken);
+            responseText = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException(
+                    $"Ollama model '{model}' returned {(int)response.StatusCode} {response.StatusCode}: {Trim(responseText, 400)}");
+
+            using var envelope = JsonDocument.Parse(responseText);
+            var root = envelope.RootElement;
+            var doneReason = root.TryGetProperty("done_reason", out var reason) ? reason.ToString() : "(not supplied)";
+            var tokens = root.TryGetProperty("eval_count", out var count) ? count.ToString() : "?";
+            Services.AppLog.Shared.Write("Info", source,
+                $"Response after {clock.ElapsedMilliseconds} ms; done_reason={doneReason}; output tokens={tokens}",
+                responseText);
+            if (!root.TryGetProperty("message", out var message) ||
+                !message.TryGetProperty("content", out var content))
+                throw new InvalidDataException("Ollama's response did not contain message.content.");
+
+            var json = StripCodeFence(content.GetString() ?? "");
+            using var parsed = JsonDocument.Parse(json);
+            if (parsed.RootElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("Expected a JSON object from the model.");
+
+            // Diagnose missing stage fields before the downstream typed parser runs.
+            var required = profile.EndsWith(" / perception", StringComparison.Ordinal)
+                ? new[] { "screen_type", "summary", "visible_text", "confidence", "dialogue_complete", "change_summary" }
+                : new[] { "outcome", "goal", "task", "actions", "memories" };
+            foreach (var field in required)
+                if (!parsed.RootElement.TryGetProperty(field, out _))
+                    throw new InvalidDataException($"Model JSON is missing required field '{field}'.");
+            return new OllamaResult(json, ReadMetrics(root, model, profile, json));
         }
-
-        using var envelope = JsonDocument.Parse(responseText);
-        if (!envelope.RootElement.TryGetProperty("message", out var message) ||
-            !message.TryGetProperty("content", out var content))
-            throw new InvalidDataException("Ollama's response did not contain message.content.");
-
-        var json = StripCodeFence(content.GetString() ?? "");
-        // Validate before returning so malformed responses fail in this stage.
-        using var _ = JsonDocument.Parse(json);
-        return new OllamaResult(json, ReadMetrics(envelope.RootElement, model, profile, json));
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Services.AppLog.Shared.Write("Info", source, "Request cancelled");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Services.AppLog.Shared.Write("Error", source,
+                $"Request or JSON validation failed after {clock.ElapsedMilliseconds} ms: {ex.Message}",
+                $"{ex}\n\nFull Ollama response (including completion reason when supplied):\n{responseText}");
+            throw;
+        }
     }
 
     private static object BuildPerceptionSchema() => new

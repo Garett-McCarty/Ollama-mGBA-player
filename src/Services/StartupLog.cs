@@ -7,51 +7,43 @@ internal static class StartupLog
 {
     public static void Initialize()
     {
-        try
-        {
-            var directory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "OllamaNetGB", "logs");
-            Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, $"startup-{DateTime.Now:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
-            var file = TextWriter.Synchronized(new StreamWriter(path, append: true) { AutoFlush = true });
-            // Keep dotnet run output visible while also retaining diagnostics on disk.
-            Console.SetOut(TextWriter.Synchronized(new TeeWriter(Console.Out, file)));
-            Console.SetError(TextWriter.Synchronized(new TeeWriter(Console.Error, file)));
-            Trace.Listeners.Add(new TextWriterTraceListener(file));
-            Trace.AutoFlush = true;
-            AppDomain.CurrentDomain.UnhandledException += (_, e) => Console.Error.WriteLine(e.ExceptionObject);
-            Console.WriteLine($"Started {DateTimeOffset.Now:O}; {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
-            Console.WriteLine($"Diagnostic log: {path}");
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Logging must not prevent the desktop window from opening.
-        }
+        Console.SetOut(TextWriter.Synchronized(new LogWriter(Console.Out, "Info")));
+        Console.SetError(TextWriter.Synchronized(new LogWriter(Console.Error, "Error")));
+        Trace.Listeners.Add(new TextWriterTraceListener(Console.Error));
+        Trace.AutoFlush = true;
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            AppLog.Shared.Write("Error", "Unhandled", "Unhandled exception", e.ExceptionObject.ToString() ?? "");
+        Console.WriteLine($"Started {DateTimeOffset.Now:O}; {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
     }
 
-    private sealed class TeeWriter(TextWriter console, TextWriter file) : TextWriter
+    private sealed class LogWriter(TextWriter original, string level) : TextWriter
     {
-        public override Encoding Encoding => console.Encoding;
+        private readonly StringBuilder _pending = new();
+        public override Encoding Encoding => original.Encoding;
         public override void Write(char value)
         {
-            console.Write(value);
-            file.Write(value);
+            original.Write(value);
+            if (value == '\n') Emit();
+            else if (value != '\r') _pending.Append(value);
+            if (_pending.Length >= 65536) Emit();
         }
         public override void Write(string? value)
         {
-            console.Write(value);
-            file.Write(value);
+            if (value is not null) foreach (var c in value) Write(c);
         }
         public override void WriteLine(string? value)
         {
-            console.WriteLine(value);
-            file.WriteLine(value);
+            original.WriteLine(value);
+            Emit();
+            AppLog.Shared.Write(level, "Application", value?.Split('\n')[0] ?? "", value ?? "");
         }
-        public override void Flush()
+        public override void Flush() { original.Flush(); Emit(); }
+        private void Emit()
         {
-            console.Flush();
-            file.Flush();
+            if (_pending.Length == 0) return;
+            var text = _pending.ToString();
+            _pending.Clear();
+            AppLog.Shared.Write(level, "Application", text);
         }
     }
 }

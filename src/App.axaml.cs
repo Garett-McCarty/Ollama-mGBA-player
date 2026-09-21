@@ -57,6 +57,7 @@ public partial class App : Application
 
             desktop.Exit += (_, _) =>
             {
+                mainViewModel.Logs.Dispose();
                 mgba.Dispose();
                 ollama.Dispose();
                 memory.Dispose();

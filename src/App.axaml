@@ -51,5 +51,8 @@
         <DataTemplate DataType="vm:GameViewModel">
             <views:GameView />
         </DataTemplate>
+        <DataTemplate DataType="vm:LogViewModel">
+            <views:LogView />
+        </DataTemplate>
     </Application.DataTemplates>
 </Application>

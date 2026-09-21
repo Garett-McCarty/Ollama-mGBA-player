@@ -156,3 +156,34 @@ metrics remain in this revision.
 Validation: patch application, archive integrity, XML/JSON syntax and preservation
 of the newer core feature files were checked. No .NET SDK or Windows desktop was
 available here, so compilation and live integration remain untested.
+
+## Diagnostic Logs view
+
+Open **Logs** in the top navigation bar. Select an entry to see its full details,
+then choose **Copy selected**. **Pause live updates** freezes the visible list
+while disk logging continues. **Errors only** filters the list; **Refresh**
+manually updates it even while paused. Your selection stays available as new
+events arrive. The player continues running when navigating between pages.
+
+The view keeps the latest 200 entries plus your selection. Details over 64 KiB
+are shortened in the view, with the full entry retained on disk. The current
+file path appears above the list. Session logs are JSON Lines under the platform
+LocalApplicationData/OllamaNetGB/logs directory (Windows:
+%LOCALAPPDATA%\OllamaNetGB\logs). Files roll over at approximately 10 MiB and
+are retained until manually removed. File-write failures appear in the view;
+in-memory logging continues.
+
+Ollama entries identify the model, perception/planner stage and request ID.
+Responses include elapsed milliseconds, done_reason and output token count when
+Ollama supplies them. Failed JSON parsing logs the raw response even when HTTP
+status is 200. Responses are logged locally, including model-generated text;
+request screenshots, prompts and database credentials are not logged by this
+service. Existing console errors and startup messages appear in the same view.
+
+To capture the current issue: reproduce one failed turn, open Logs, select the
+Ollama validation error, and Copy selected. If JSON parsed but typed conversion
+failed, also copy the preceding Response entry for the same stage.
+
+This change adds diagnostics, not JSON repair or a model/token-budget change.
+Validation here covered patch application and XML/binding wiring checks.
+Compilation and a live Avalonia UI run still need the workstation's .NET SDK.

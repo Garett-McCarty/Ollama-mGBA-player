@@ -8,6 +8,7 @@ public sealed partial class MainWindowViewModel : ObservableObject
 {
     private readonly SettingsViewModel _settingsViewModel;
     private readonly GameViewModel _gameViewModel;
+    public LogViewModel Logs { get; } = new();
 
     [ObservableProperty] private ObservableObject _currentPage;
 
@@ -19,6 +20,7 @@ public sealed partial class MainWindowViewModel : ObservableObject
         settingsViewModel.SaveCompleted += (_, _) => ShowGameView();
     }
 
+    [RelayCommand] private void ShowLogs() => CurrentPage = Logs;
     [RelayCommand] private void ShowSettings() => CurrentPage = _settingsViewModel;
     [RelayCommand] private void ShowGameView() => CurrentPage = _gameViewModel;
 }
