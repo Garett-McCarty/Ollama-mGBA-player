@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Neo4j.Driver;
+using OllamaNetGB.AI;
 using OllamaNetGB.Config;
 using OllamaNetGB.Services;
 
@@ -27,10 +28,19 @@ public partial class SettingsViewModel : ObservableObject
         MgbaHttpBaseUrl    = current.MgbaHttpBaseUrl;
         OllamaBaseUri      = current.OllamaBaseUri;
         OllamaModel        = current.OllamaModel;
+        PerceptionModel    = current.OllamaPerceptionModel;
+        PlannerModel       = current.OllamaPlannerModel;
         SessionGoal        = current.SessionGoal;
         GamePrompt         = current.GamePrompt;
         FrameIntervalMs    = current.FrameIntervalMs;
+        PerceptionFrameCount = current.PerceptionFrameCount;
+        StableFrameCaptureDelayMs = current.StableFrameCaptureDelayMs;
+        StableFrameMatchCount = current.StableFrameMatchCount;
+        StableFrameTimeoutMs = current.StableFrameTimeoutMs;
         DecisionHistoryCount = current.DecisionHistoryCount;
+        MaxActionsPerTurn = current.MaxActionsPerTurn;
+        MemoryCandidateThreshold = (decimal)current.MemoryCandidateThreshold;
+        MemoryPromptThreshold = (decimal)current.MemoryPromptThreshold;
         Neo4jUri           = current.Neo4jUri;
         Neo4jUser          = current.Neo4jUser;
         Neo4jPassword      = current.Neo4jPassword;
@@ -68,6 +78,12 @@ public partial class SettingsViewModel : ObservableObject
     private string _ollamaModel = "";
 
     [ObservableProperty]
+    private string _perceptionModel = "";
+
+    [ObservableProperty]
+    private string _plannerModel = "";
+
+    [ObservableProperty]
     private string _sessionGoal = "";
 
     [ObservableProperty]
@@ -77,10 +93,45 @@ public partial class SettingsViewModel : ObservableObject
     private string _ollamaStatus = "";
 
     [ObservableProperty]
-    private decimal? _frameIntervalMs = 1500;
+    private decimal? _frameIntervalMs = 750;
+
+    [ObservableProperty]
+    private decimal? _perceptionFrameCount = 3;
+
+    [ObservableProperty]
+    private decimal? _stableFrameCaptureDelayMs = 120;
+
+    [ObservableProperty]
+    private decimal? _stableFrameMatchCount = 3;
+
+    [ObservableProperty]
+    private decimal? _stableFrameTimeoutMs = 2500;
 
     [ObservableProperty]
     private decimal? _decisionHistoryCount = 12;
+
+    [ObservableProperty]
+    private decimal? _maxActionsPerTurn = 4;
+
+    [ObservableProperty]
+    private decimal? _memoryCandidateThreshold = 0.55m;
+
+    [ObservableProperty]
+    private decimal? _memoryPromptThreshold = 0.50m;
+
+    public string ModelCompatibilityText
+    {
+        get
+        {
+            var perception = string.IsNullOrWhiteSpace(PerceptionModel) ? OllamaModel : PerceptionModel;
+            var planner = string.IsNullOrWhiteSpace(PlannerModel) ? OllamaModel : PlannerModel;
+            return $"Vision: {ModelCompatibility.Resolve(perception).Name} · Planner: {ModelCompatibility.Resolve(planner).Name}";
+        }
+    }
+
+    partial void OnOllamaModelChanged(string value) => OnPropertyChanged(nameof(ModelCompatibilityText));
+    partial void OnPerceptionModelChanged(string value) => OnPropertyChanged(nameof(ModelCompatibilityText));
+    partial void OnPlannerModelChanged(string value) => OnPropertyChanged(nameof(ModelCompatibilityText));
 
     [ObservableProperty]
     private string _neo4jUri = "";
@@ -224,10 +275,19 @@ public partial class SettingsViewModel : ObservableObject
         current.MgbaHttpBaseUrl    = MgbaHttpBaseUrl;
         current.OllamaBaseUri      = OllamaBaseUri;
         current.OllamaModel        = OllamaModel;
+        current.OllamaPerceptionModel = PerceptionModel;
+        current.OllamaPlannerModel = PlannerModel;
         current.SessionGoal        = SessionGoal;
         current.GamePrompt         = GamePrompt;
-        current.FrameIntervalMs    = (int)(FrameIntervalMs ?? 1500);
+        current.FrameIntervalMs    = (int)(FrameIntervalMs ?? 750);
+        current.PerceptionFrameCount = (int)(PerceptionFrameCount ?? 3);
+        current.StableFrameCaptureDelayMs = (int)(StableFrameCaptureDelayMs ?? 120);
+        current.StableFrameMatchCount = (int)(StableFrameMatchCount ?? 3);
+        current.StableFrameTimeoutMs = (int)(StableFrameTimeoutMs ?? 2500);
         current.DecisionHistoryCount = (int)(DecisionHistoryCount ?? 12);
+        current.MaxActionsPerTurn = (int)(MaxActionsPerTurn ?? 4);
+        current.MemoryCandidateThreshold = (double)(MemoryCandidateThreshold ?? 0.55m);
+        current.MemoryPromptThreshold = (double)(MemoryPromptThreshold ?? 0.50m);
         current.Neo4jUri           = Neo4jUri;
         current.Neo4jUser          = Neo4jUser;
         current.Neo4jPassword      = Neo4jPassword;
@@ -245,6 +305,9 @@ public partial class SettingsViewModel : ObservableObject
             return "err Empty";
         if (!File.Exists(path))
             return "err File not found";
+
+        if (OperatingSystem.IsWindows() && !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return "err Select a Windows .exe";
 
         if (OperatingSystem.IsLinux())
         {

@@ -15,26 +15,27 @@ public sealed class MgbaHttpClient : IMgbaClient, IDisposable
 
     private readonly ISettingsService _settings;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
-    private readonly string _screenshotPath;
+    private readonly string _captureDirectory;
     private Process? _mgbaProcess;
     private Process? _httpProcess;
 
     public MgbaHttpClient(ISettingsService settings)
     {
         _settings = settings;
-        var captureDirectory = Path.Combine(Path.GetTempPath(), "OllamaNetGB");
-        Directory.CreateDirectory(captureDirectory);
-        _screenshotPath = Path.Combine(captureDirectory, "current-frame.png");
+        _captureDirectory = Path.Combine(Path.GetTempPath(), "OllamaNetGB");
+        Directory.CreateDirectory(_captureDirectory);
     }
 
     public async Task EnsureReadyAsync(CancellationToken cancellationToken)
     {
+        var settings = _settings.Current;
+        if (!new Uri(BuildUrl("")).IsLoopback)
+            throw new InvalidOperationException("Run the player, mGBA and mGBA-http on the same computer and use a localhost mGBA-http URL. Screenshot capture requires a shared local filesystem.");
+
         if (await IsAliveAsync(cancellationToken))
             return;
 
-        var settings = _settings.Current;
-
-        if (!await IsHttpServerAvailableAsync(cancellationToken))
+        if (!await IsHttpServerAvailableAsync(cancellationToken) && !IsProcessRunning(_httpProcess))
         {
             if (!File.Exists(settings.MgbaHttpBinaryPath))
                 throw new InvalidOperationException("mGBA-http is not running and its executable path is not configured.");
@@ -60,6 +61,10 @@ public sealed class MgbaHttpClient : IMgbaClient, IDisposable
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (_mgbaProcess is not null && !IsProcessRunning(_mgbaProcess))
+                throw new InvalidOperationException("mGBA exited before connecting. Check the Windows executable and its companion DLLs.");
+            if (_httpProcess is not null && !IsProcessRunning(_httpProcess))
+                throw new InvalidOperationException("mGBA-http exited before connecting. Run it directly to see its startup error.");
             if (await IsAliveAsync(cancellationToken))
                 return;
 
@@ -72,18 +77,45 @@ public sealed class MgbaHttpClient : IMgbaClient, IDisposable
 
     public async Task<byte[]?> GetScreenshotAsync(CancellationToken cancellationToken)
     {
-        var url = BuildUrl("/core/screenshot?path=" + Uri.EscapeDataString(_screenshotPath));
-        using var response = await _http.PostAsync(url, content: null, cancellationToken);
-        await EnsureSuccessAsync(response, "capture an mGBA screenshot", cancellationToken);
-
-        if (!File.Exists(_screenshotPath))
-            return null;
-
-        return await File.ReadAllBytesAsync(_screenshotPath, cancellationToken);
+        // A unique request path prevents stale frames and concurrent capture collisions.
+        var screenshotPath = Path.Combine(_captureDirectory, $"frame-{Guid.NewGuid():N}.png");
+        try
+        {
+            var url = BuildUrl("/core/screenshot?path=" + Uri.EscapeDataString(screenshotPath));
+            using var response = await _http.PostAsync(url, content: null, cancellationToken);
+            await EnsureSuccessAsync(response, "capture an mGBA screenshot", cancellationToken);
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    if (File.Exists(screenshotPath))
+                    {
+                        var bytes = await File.ReadAllBytesAsync(screenshotPath, cancellationToken);
+                        if (bytes.Length > 0) return bytes;
+                    }
+                }
+                catch (IOException) { /* mGBA may still have the file open on Windows. */ }
+                await Task.Delay(50, cancellationToken);
+            }
+            throw new IOException("mGBA did not write a screenshot. Keep mGBA and this player on the same computer and check the Lua connection.");
+        }
+        finally
+        {
+            try { File.Delete(screenshotPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     public async Task TapAsync(GbaButton button, int holdMs, CancellationToken cancellationToken)
     {
+        if (button == GbaButton.Wait)
+        {
+            await Task.Delay(Math.Clamp(holdMs, 16, 2_000), cancellationToken);
+            return;
+        }
+
         holdMs = Math.Clamp(holdMs, 16, 2_000);
         string path;
 
@@ -138,7 +170,8 @@ public sealed class MgbaHttpClient : IMgbaClient, IDisposable
     private string BuildUrl(string path)
     {
         var baseUrl = _settings.Current.MgbaHttpBaseUrl.TrimEnd('/');
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out _))
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             throw new InvalidOperationException("The mGBA-http URL in Settings is invalid.");
 
         return baseUrl + path;
@@ -146,6 +179,9 @@ public sealed class MgbaHttpClient : IMgbaClient, IDisposable
 
     private static Process StartProcess(string executable, params string[] arguments)
     {
+        executable = Path.GetFullPath(executable);
+        if (OperatingSystem.IsWindows() && !executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Select a Windows .exe, not a Linux binary or AppImage.");
         var startInfo = new ProcessStartInfo
         {
             FileName = executable,

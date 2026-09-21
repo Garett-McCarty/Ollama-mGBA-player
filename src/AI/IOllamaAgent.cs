@@ -7,9 +7,13 @@ namespace OllamaNetGB.AI;
 
 public interface IOllamaAgent
 {
+    Task<PerceptionSnapshot> PerceiveAsync(
+        IReadOnlyList<byte[]> chronologicalFrames,
+        bool frameBatchStable,
+        CancellationToken cancellationToken);
+
     Task<CognitiveTurn> DecideAsync(
-        byte[] screenshotPng,
-        byte[]? previousScreenshotPng,
+        PerceptionSnapshot perception,
         IReadOnlyList<DecisionLogEntry> recentHistory,
         AgentContext context,
         CancellationToken cancellationToken);

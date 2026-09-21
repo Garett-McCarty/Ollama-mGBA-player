@@ -12,308 +12,281 @@ namespace OllamaNetGB.Agent;
 /// </summary>
 public sealed class AgentCoordinator
 {
-	/// <summary>
-	/// The default root goal for our agent
-	/// </summary>
-	private const string DefaultRootGoal =
-		"Explore the game, learn its controls, avoid repeated failures, and make measurable progress.";
+    private const string DefaultRootGoal =
+        "Explore the game, learn its controls, avoid repeated failures, and make measurable progress.";
 
-	/// <summary>
-	/// The Ollama Agent interface
-	/// </summary>
-	private readonly IOllamaAgent _agent;
+    private readonly IOllamaAgent _agent;
+    private readonly IAgentMemory _memory;
+    private readonly IGameProfileProvider _profiles;
+    private readonly ISettingsService _settings;
+    private readonly FrameProgressDetector _progress = new();
+    private readonly string _sessionId = Guid.NewGuid().ToString("N");
+    private readonly List<AgentTaskItem> _tasks = [];
 
-	/// <summary>
-	/// The graph storage for our agent
-	/// </summary>
-	private readonly IAgentMemory _memory;
+    private GameProfile? _profile;
+    private string _loadedGameId = "";
+    private string _activeGoal = "";
+    private string _activeTask = "";
+    private PerceptionSnapshot? _previousPerception;
 
-	/// <summary>
-	/// The game profile provider for our agent to reference against our active game identifier
-	/// </summary>
-	private readonly IGameProfileProvider _profiles;
+    public AgentCoordinator(
+        IOllamaAgent agent,
+        IAgentMemory memory,
+        IGameProfileProvider profiles,
+        ISettingsService settings)
+    {
+        _agent = agent;
+        _memory = memory;
+        _profiles = profiles;
+        _settings = settings;
+    }
 
-	/// <summary>
-	/// The application settings service
-	/// </summary>
-	private readonly ISettingsService _settings;
+    public string ActiveGoal => _activeGoal;
+    public string ActiveTask => _activeTask;
+    public string MemoryStatus => _memory.Status;
 
-	/// <summary>
-	/// Determines frame progress
-	/// </summary>
-	private readonly FrameProgressDetector _progress = new();
+    public async Task<CoordinatorTurnResult> ProcessTurnAsync(
+        IReadOnlyList<byte[]> chronologicalFrames,
+        bool frameBatchStable,
+        IReadOnlyList<DecisionLogEntry> recentHistory,
+        CancellationToken cancellationToken)
+    {
+        if (chronologicalFrames.Count == 0)
+            throw new ArgumentException("At least one frame is required.", nameof(chronologicalFrames));
 
-	/// <summary>
-	/// Current session identifier for this run
-	/// </summary>
-	private readonly string _sessionId = Guid.NewGuid().ToString("N");
+        var screenshotPng = chronologicalFrames[^1];
+        var gameId = GetGameId();
+        await EnsureProfileAsync(gameId, cancellationToken);
+        var profile = _profile!;
+        var visual = _progress.Observe(screenshotPng);
+        var recalled = await _memory.RecallAsync(gameId, 30, cancellationToken);
+        var rootGoal = GetRootGoal(profile);
 
-	/// <summary>
-	/// Queue of tasks our agent wants to complete
-	/// </summary>
-	private readonly List<AgentTaskItem> _tasks = [];
+        if (string.IsNullOrWhiteSpace(_activeGoal))
+            _activeGoal = rootGoal;
 
-	/// <summary>
-	/// The game profile
-	/// </summary>
-	private GameProfile? _profile;
+        var query = $"{_activeGoal} {_activeTask}";
+        var knowledge = _profiles.Search(profile, query);
+        var context = new AgentContext(
+            rootGoal,
+            _activeGoal,
+            _activeTask,
+            _tasks.Where(task => task.Status == "Queued").Select(task => task.Description).ToArray(),
+            visual.StuckCount,
+            visual.Changed,
+            CombineProfilePrompt(profile),
+            knowledge,
+            recalled
+                .Where(memory => memory.State is MemoryState.Confirmed or MemoryState.Trusted or MemoryState.Pinned)
+                .Where(memory => memory.Confidence * memory.Weight >= _settings.Current.MemoryPromptThreshold)
+                .OrderByDescending(memory => memory.State == MemoryState.Pinned)
+                .ThenByDescending(memory => memory.Confidence * memory.Weight)
+                .Take(8)
+                .Select(memory => $"{memory.Kind} ({memory.State}, {memory.Confidence * memory.Weight:P0}): {memory.Summary}")
+                .ToArray());
 
-	/// <summary>
-	/// The game identifier that is loaded in mGBA
-	/// </summary>
-	private string _loadedGameId = "";
+        var perception = !visual.Changed && _previousPerception is not null
+            ? _previousPerception with
+            {
+                ScreenStable = frameBatchStable,
+                ChangeSummary = "Final frame is unchanged since the previous decision.",
+                Metrics = InferenceMetrics.Empty("perception-cache")
+            }
+            : await _agent.PerceiveAsync(chronologicalFrames, frameBatchStable, cancellationToken);
 
-	/// <summary>
-	/// The current goal of our agent
-	/// </summary>
-	private string _activeGoal = "";
+        var turn = await _agent.DecideAsync(perception, recentHistory, context, cancellationToken);
+        _previousPerception = perception;
 
-	/// <summary>
-	/// The current task of our agent
-	/// </summary>
-	private string _activeTask = "";
+        ApplyGoal(turn.Goal, rootGoal);
+        ApplyTasks(turn.Task);
+        foreach (var action in turn.Actions)
+            _progress.RecordAction(action.Button);
+        if (turn.Outcome.MeaningfulProgress || turn.Outcome.Kind is OutcomeKind.Success)
+            _progress.MarkProgress();
 
-	/// <summary>
-	/// Previous screenshot we captured
-	/// </summary>
-	private byte[]? _previousScreenshot;
+        await StoreMeaningfulMemoriesAsync(gameId, turn, cancellationToken);
+        var latest = await _memory.RecallAsync(gameId, 30, cancellationToken);
 
-	/// <summary>
-	/// Construct a new AgentCoordinator
-	/// </summary>
-	/// <param name="agent"></param>
-	/// <param name="memory"></param>
-	/// <param name="profiles"></param>
-	/// <param name="settings"></param>
-	public AgentCoordinator(
-		IOllamaAgent agent,
-		IAgentMemory memory,
-		IGameProfileProvider profiles,
-		ISettingsService settings)
-	{
-		_agent = agent;
-		_memory = memory;
-		_profiles = profiles;
-		_settings = settings;
-	}
+        return new CoordinatorTurnResult(
+            turn,
+            perception,
+            _activeGoal,
+            _activeTask,
+            _tasks.ToArray(),
+            latest.Select(ToDisplayItem).ToArray(),
+            visual.StuckCount,
+            visual.Changed);
+    }
 
-	/// <summary>
-	/// Get the agent's active goal
-	/// </summary>
-	public string ActiveGoal => _activeGoal;
+    public async Task SetGoalAsync(string goal, CancellationToken cancellationToken)
+    {
+        goal = Clean(goal, 500);
+        if (string.IsNullOrWhiteSpace(goal))
+            return;
 
-	/// <summary>
-	/// Get the agent's active task
-	/// </summary>
-	public string ActiveTask => _activeTask;
+        _activeGoal = goal;
+        _activeTask = "";
+        _tasks.Clear();
+        _previousPerception = null;
+        await _memory.RememberAsync(
+            new MemoryRecord(
+                GetGameId(),
+                _sessionId,
+                MemoryKind.Progress,
+                $"User set a new objective: {goal}",
+                1,
+                "user",
+                DateTimeOffset.UtcNow),
+            cancellationToken);
+    }
 
-	/// <summary>
-	/// 
-	/// </summary>
-	public string MemoryStatus => _memory.Status;
+    public Task<bool> DeleteMemoryAsync(
+        MemoryDisplayItem memory,
+        CancellationToken cancellationToken) =>
+        _memory.DeleteAsync(
+            GetGameId(),
+            memory.Kind,
+            memory.Summary,
+            cancellationToken);
 
-	public async Task<CoordinatorTurnResult> ProcessTurnAsync(
-		byte[] screenshotPng,
-		IReadOnlyList<DecisionLogEntry> recentHistory,
-		CancellationToken cancellationToken)
-	{
-		var gameId = GetGameId();
-		await EnsureProfileAsync(gameId, cancellationToken);
-		var profile = _profile!;
-		var visual = _progress.Observe(screenshotPng);
-		var recalled = await _memory.RecallAsync(gameId, 8, cancellationToken);
-		var rootGoal = GetRootGoal(profile);
+    public Task<bool> UpdateMemoryAsync(MemoryDisplayItem memory, MemoryState state,
+        double weight, CancellationToken cancellationToken) =>
+        _memory.UpdateAsync(GetGameId(), memory.Kind, memory.Summary, state,
+            Math.Clamp(weight, 0, 2), cancellationToken);
 
-		if (string.IsNullOrWhiteSpace(_activeGoal))
-			_activeGoal = rootGoal;
+    public async Task<bool> ClearMemoriesAsync(
+        CancellationToken cancellationToken)
+        => await _memory.ClearAsync(GetGameId(), cancellationToken);
 
-		var query = $"{_activeGoal} {_activeTask}";
-		var knowledge = _profiles.Search(profile, query);
-		var context = new AgentContext(
-			rootGoal,
-			_activeGoal,
-			_activeTask,
-			_tasks.Where(task => task.Status == "Queued").Select(task => task.Description).ToArray(),
-			visual.StuckCount,
-			visual.Changed,
-			CombineProfilePrompt(profile),
-			knowledge,
-			recalled.Select(memory => $"{memory.Kind}: {memory.Summary}").ToArray());
+    private async Task EnsureProfileAsync(string gameId, CancellationToken cancellationToken)
+    {
+        if (_profile is not null && string.Equals(gameId, _loadedGameId, StringComparison.Ordinal))
+            return;
 
-		var turn = await _agent.DecideAsync(
-			screenshotPng,
-			_previousScreenshot,
-			recentHistory,
-			context,
-			cancellationToken);
-		_previousScreenshot = screenshotPng.ToArray();
+        _profile = await _profiles.ResolveAsync(gameId, cancellationToken);
+        _loadedGameId = gameId;
+        _activeGoal = "";
+        _activeTask = "";
+        _tasks.Clear();
+        _previousPerception = null;
+    }
 
-		ApplyGoal(turn.Goal, rootGoal);
-		ApplyTasks(turn.Task);
-		_progress.RecordAction(turn.Action.Button);
-		if (turn.Outcome.MeaningfulProgress || turn.Outcome.Kind is OutcomeKind.Success)
-			_progress.MarkProgress();
+    private string GetRootGoal(GameProfile profile)
+    {
+        var configured = _settings.Current.SessionGoal?.Trim();
+        return string.IsNullOrWhiteSpace(configured) ? DefaultRootGoal : Clean(configured, 800);
+    }
 
-		await StoreMeaningfulMemoriesAsync(gameId, turn, cancellationToken);
-		var latest = await _memory.RecallAsync(gameId, 8, cancellationToken);
+    private string CombineProfilePrompt(GameProfile profile)
+    {
+        var configured = _settings.Current.GamePrompt?.Trim();
+        return string.Join(
+            "\n",
+            new[] { profile.Prompt, configured }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+    }
 
-		return new CoordinatorTurnResult(
-			turn,
-			_activeGoal,
-			_activeTask,
-			_tasks.ToArray(),
-			latest.Select(ToDisplayItem).ToArray(),
-			visual.StuckCount);
-	}
+    private void ApplyGoal(GoalProposal proposal, string rootGoal)
+    {
+        if (proposal.CompletedCurrent)
+            _activeGoal = "";
 
-	public async Task SetGoalAsync(string goal, CancellationToken cancellationToken)
-	{
-		goal = Clean(goal, 500);
-		if (string.IsNullOrWhiteSpace(goal))
-			return;
+        if (!proposal.KeepCurrent || string.IsNullOrWhiteSpace(_activeGoal))
+            _activeGoal = Clean(proposal.Description, 500);
 
-		_activeGoal = goal;
-		_activeTask = "";
-		_tasks.Clear();
-		_previousScreenshot = null;
-		await _memory.RememberAsync(
-			new MemoryRecord(
-				GetGameId(),
-				_sessionId,
-				MemoryKind.Progress,
-				$"User set a new objective: {goal}",
-				1,
-				"user",
-				DateTimeOffset.UtcNow),
-			cancellationToken);
-	}
+        if (string.IsNullOrWhiteSpace(_activeGoal))
+            _activeGoal = rootGoal;
+    }
 
-	private async Task EnsureProfileAsync(string gameId, CancellationToken cancellationToken)
-	{
-		if (_profile is not null && string.Equals(gameId, _loadedGameId, StringComparison.Ordinal))
-			return;
+    private void ApplyTasks(TaskProposal proposal)
+    {
+        if (proposal.CompletedCurrent && _tasks.Count > 0)
+        {
+            _tasks[0] = _tasks[0] with { Status = "Completed" };
+            _activeTask = "";
+        }
 
-		_profile = await _profiles.ResolveAsync(gameId, cancellationToken);
-		_loadedGameId = gameId;
-		_activeGoal = "";
-		_activeTask = "";
-		_tasks.Clear();
-		_previousScreenshot = null;
-	}
+        if (!proposal.KeepCurrent || string.IsNullOrWhiteSpace(_activeTask))
+            _activeTask = Clean(proposal.Description, 300);
 
-	private string GetRootGoal(GameProfile profile)
-	{
-		var configured = _settings.Current.SessionGoal?.Trim();
-		return string.IsNullOrWhiteSpace(configured) ? DefaultRootGoal : Clean(configured, 800);
-	}
+        _tasks.RemoveAll(task => task.Status == "Active" || task.Status == "Queued");
+        if (!string.IsNullOrWhiteSpace(_activeTask))
+            _tasks.Insert(0, new AgentTaskItem(_activeTask, "Active"));
 
-	private string CombineProfilePrompt(GameProfile profile)
-	{
-		var configured = _settings.Current.GamePrompt?.Trim();
-		return string.Join(
-			"\n",
-			new[] { profile.Prompt, configured }
-				.Where(value => !string.IsNullOrWhiteSpace(value)));
-	}
+        foreach (var queued in proposal.QueuedTasks
+                     .Select(task => Clean(task, 300))
+                     .Where(task => !string.IsNullOrWhiteSpace(task))
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .Take(5))
+        {
+            if (!string.Equals(queued, _activeTask, StringComparison.OrdinalIgnoreCase))
+                _tasks.Add(new AgentTaskItem(queued, "Queued"));
+        }
 
-	private void ApplyGoal(GoalProposal proposal, string rootGoal)
-	{
-		if (proposal.CompletedCurrent)
-			_activeGoal = "";
+        while (_tasks.Count > 8)
+            _tasks.RemoveAt(_tasks.Count - 1);
+    }
 
-		if (!proposal.KeepCurrent || string.IsNullOrWhiteSpace(_activeGoal))
-			_activeGoal = Clean(proposal.Description, 500);
+    private async Task StoreMeaningfulMemoriesAsync(
+        string gameId,
+        CognitiveTurn turn,
+        CancellationToken cancellationToken)
+    {
+        var threshold = Math.Clamp(_settings.Current.MemoryCandidateThreshold, 0, 1);
+        if (turn.Outcome.Kind is not OutcomeKind.Unknown and not OutcomeKind.NoChange &&
+            turn.Outcome.Confidence >= threshold)
+        {
+            var kind = turn.Outcome.Kind is OutcomeKind.Failure or OutcomeKind.GameOver
+                ? MemoryKind.Failure
+                : MemoryKind.Progress;
+            await RememberAsync(gameId, kind, turn.Outcome.Summary, turn.Outcome.Confidence, "evaluator", cancellationToken);
+        }
 
-		if (string.IsNullOrWhiteSpace(_activeGoal))
-			_activeGoal = rootGoal;
-	}
+        foreach (var candidate in turn.Memories
+                     .Where(memory =>
+                         memory.Confidence >= threshold)
+                     .Take(4))
+        {
+            await RememberAsync(
+                gameId,
+                candidate.Kind,
+                candidate.Summary,
+                candidate.Confidence,
+                "agent",
+                cancellationToken);
+        }
+    }
 
-	private void ApplyTasks(TaskProposal proposal)
-	{
-		if (proposal.CompletedCurrent && _tasks.Count > 0)
-		{
-			_tasks[0] = _tasks[0] with { Status = "Completed" };
-			_activeTask = "";
-		}
+    private Task RememberAsync(
+        string gameId,
+        MemoryKind kind,
+        string summary,
+        double confidence,
+        string source,
+        CancellationToken cancellationToken) =>
+        _memory.RememberAsync(
+            new MemoryRecord(
+                gameId,
+                _sessionId,
+                kind,
+                Clean(summary, 800),
+                Math.Clamp(confidence, 0, 1),
+                source,
+                DateTimeOffset.UtcNow),
+            cancellationToken);
 
-		if (!proposal.KeepCurrent || string.IsNullOrWhiteSpace(_activeTask))
-			_activeTask = Clean(proposal.Description, 300);
+    private string GetGameId() =>
+        string.IsNullOrWhiteSpace(_settings.Current.GameId)
+            ? "unknown-gba-game"
+            : _settings.Current.GameId.Trim();
 
-		_tasks.RemoveAll(task => task.Status == "Active" || task.Status == "Queued");
-		if (!string.IsNullOrWhiteSpace(_activeTask))
-			_tasks.Insert(0, new AgentTaskItem(_activeTask, "Active"));
+    private static MemoryDisplayItem ToDisplayItem(MemoryRecord memory) =>
+        new(memory.Kind, memory.Summary, memory.Confidence, memory.Weight,
+            memory.State, memory.ConfirmationCount);
 
-		foreach (var queued in proposal.QueuedTasks
-					 .Select(task => Clean(task, 300))
-					 .Where(task => !string.IsNullOrWhiteSpace(task))
-					 .Distinct(StringComparer.OrdinalIgnoreCase)
-					 .Take(5))
-		{
-			if (!string.Equals(queued, _activeTask, StringComparison.OrdinalIgnoreCase))
-				_tasks.Add(new AgentTaskItem(queued, "Queued"));
-		}
-
-		while (_tasks.Count > 8)
-			_tasks.RemoveAt(_tasks.Count - 1);
-	}
-
-	private async Task StoreMeaningfulMemoriesAsync(
-		string gameId,
-		CognitiveTurn turn,
-		CancellationToken cancellationToken)
-	{
-		if (turn.Outcome.Kind is not OutcomeKind.Unknown and not OutcomeKind.NoChange &&
-			turn.Outcome.Confidence >= 0.6)
-		{
-			var kind = turn.Outcome.Kind is OutcomeKind.Failure or OutcomeKind.GameOver
-				? MemoryKind.Failure
-				: MemoryKind.Progress;
-			await RememberAsync(gameId, kind, turn.Outcome.Summary, turn.Outcome.Confidence, "evaluator", cancellationToken);
-		}
-
-		foreach (var candidate in turn.Memories
-					 .Where(memory => memory.Confidence >= 0.6)
-					 .Take(4))
-		{
-			await RememberAsync(
-				gameId,
-				candidate.Kind,
-				candidate.Summary,
-				candidate.Confidence,
-				"agent",
-				cancellationToken);
-		}
-	}
-
-	private Task RememberAsync(
-		string gameId,
-		MemoryKind kind,
-		string summary,
-		double confidence,
-		string source,
-		CancellationToken cancellationToken) =>
-		_memory.RememberAsync(
-			new MemoryRecord(
-				gameId,
-				_sessionId,
-				kind,
-				Clean(summary, 800),
-				Math.Clamp(confidence, 0, 1),
-				source,
-				DateTimeOffset.UtcNow),
-			cancellationToken);
-
-	private string GetGameId() =>
-		string.IsNullOrWhiteSpace(_settings.Current.GameId)
-			? "unknown-gba-game"
-			: _settings.Current.GameId.Trim();
-
-	private static MemoryDisplayItem ToDisplayItem(MemoryRecord memory) =>
-		new(memory.Kind.ToString(), memory.Summary, $"{memory.Confidence:P0}");
-
-	private static string Clean(string? value, int maximumLength)
-	{
-		value = value?.Trim().ReplaceLineEndings(" ") ?? "";
-		return value.Length <= maximumLength ? value : value[..maximumLength] + "…";
-	}
+    private static string Clean(string? value, int maximumLength)
+    {
+        value = value?.Trim().ReplaceLineEndings(" ") ?? "";
+        return value.Length <= maximumLength ? value : value[..maximumLength] + "…";
+    }
 }

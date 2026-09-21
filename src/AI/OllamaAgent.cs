@@ -7,292 +7,447 @@ using OllamaNetGB.Models;
 namespace OllamaNetGB.AI;
 
 /// <summary>
-/// Sends the current frame and validated coordinator context to a vision model.
+/// Two-stage Ollama agent. The perception pass is the only pass that receives
+/// screenshots. The planner receives a compact text state packet plus goals,
+/// history, profile knowledge, and memory.
 /// </summary>
 public sealed class OllamaAgent : IOllamaAgent, IDisposable
 {
-    private const string SystemPrompt = """
-        You are the perception, planning, and control component of a general-purpose Game Boy Advance agent.
-        Inspect the current screenshot, assess the result of recent actions, maintain a semantic goal and task,
-        and choose exactly one useful next button. Do not assume a specific game unless the supplied profile says so.
-        Prefer observable evidence. Mark uncertain interpretations with lower confidence. A memory candidate must be
-        a durable fact, strategy, landmark, control discovery, progress event, failure, or warning—not a guess.
-        Keep reasoning short and player-facing; never provide hidden chain-of-thought. Return only the requested JSON.
+    private const string PerceptionSystemPrompt = """
+        You are the visual perception stage for a general-purpose Game Boy Advance agent.
+        Images are chronological, oldest to newest. The FINAL image is authoritative.
+        Describe only what is visibly supported. Transcribe visible text conservatively.
+        Never invent the missing ending of dialogue that is still typing.
+        dialogue_complete means the latest dialogue/menu text appears fully drawn and safe
+        for a planner to act on. Animated sprites or backgrounds do not by themselves make
+        dialogue incomplete. Return only JSON matching the supplied schema.
+        """;
+
+    private const string PlannerSystemPrompt = """
+        You are the planning stage for a general-purpose Game Boy Advance agent. You do NOT
+        see screenshots. Treat the supplied PERCEPTION packet as authoritative visual state.
+        Maintain a semantic goal and task and return only JSON matching the supplied schema.
+        Prefer observable evidence and lower confidence when uncertain. Memories must be
+        durable facts, strategies, landmarks, controls, progress, failures, or warnings—not
+        guesses. Return one action unless a short deterministic atomic combo is safe without
+        another observation. WAIT is a real action: use it when dialogue is incomplete, the
+        game is transitioning, or acting now would require guessing. Keep reasoning short and
+        player-facing. Do not expose hidden chain-of-thought; give only a brief action rationale.
         """;
 
     private readonly ISettingsService _settings;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMinutes(3) };
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMinutes(5) };
 
     public OllamaAgent(ISettingsService settings) => _settings = settings;
 
+    public async Task<PerceptionSnapshot> PerceiveAsync(
+        IReadOnlyList<byte[]> chronologicalFrames,
+        bool frameBatchStable,
+        CancellationToken cancellationToken)
+    {
+        if (chronologicalFrames.Count == 0)
+            throw new ArgumentException("At least one frame is required.", nameof(chronologicalFrames));
+
+        var settings = _settings.Current;
+        var model = ResolvePerceptionModel(settings);
+        var profile = ModelCompatibility.Resolve(model);
+        var images = chronologicalFrames
+            .TakeLast(Math.Clamp(settings.PerceptionFrameCount, 1, 4))
+            .Select(Convert.ToBase64String)
+            .ToArray();
+
+        var request = new
+        {
+            model,
+            stream = false,
+            think = false,
+            format = BuildPerceptionSchema(),
+            messages = new object[]
+            {
+                new { role = "system", content = PerceptionSystemPrompt },
+                new
+                {
+                    role = "user",
+                    content = $"""
+                        FRAME COUNT: {images.Length}
+                        CAPTURE STABILITY SIGNAL: {(frameBatchStable ? "stable" : "still changing or animated")}
+                        Compare the chronological frames and describe the FINAL frame. If visible dialogue
+                        changed across the frames or is visibly mid-render in the final frame, set
+                        dialogue_complete=false. Do not penalize normal map animation.
+                        """,
+                    images
+                }
+            },
+            options = new
+            {
+                temperature = 0,
+                num_ctx = Math.Min(profile.ContextSize, 4096),
+                num_predict = Math.Min(profile.MaximumResponseTokens, 450)
+            }
+        };
+
+        var result = await SendAsync(model, profile.Name + " / perception", request, cancellationToken);
+        using var json = JsonDocument.Parse(result.Json);
+        var root = json.RootElement;
+        var observation = new Observation(
+            ParseEnum(root, "screen_type", ScreenKind.Unknown),
+            GetText(root, "summary", "Unknown screen."),
+            GetText(root, "visible_text", ""),
+            GetConfidence(root, "confidence"));
+
+        return new PerceptionSnapshot(
+            observation,
+            frameBatchStable,
+            GetBool(root, "dialogue_complete"),
+            GetText(root, "change_summary", frameBatchStable ? "Screen settled." : "Screen changed during capture."),
+            result.Metrics);
+    }
+
     public async Task<CognitiveTurn> DecideAsync(
-        byte[] screenshotPng,
-        byte[]? previousScreenshotPng,
+        PerceptionSnapshot perception,
         IReadOnlyList<DecisionLogEntry> recentHistory,
         AgentContext context,
         CancellationToken cancellationToken)
     {
         var settings = _settings.Current;
-        if (string.IsNullOrWhiteSpace(settings.OllamaModel))
-            throw new InvalidOperationException("Choose an Ollama vision model in Settings.");
-
-        var history = BuildHistory(recentHistory, settings.DecisionHistoryCount);
+        var model = ResolvePlannerModel(settings);
+        var profile = ModelCompatibility.Resolve(model);
+        var maxActions = Math.Clamp(Math.Min(settings.MaxActionsPerTurn, profile.MaximumActions), 1, 4);
         var request = new
         {
-            model = settings.OllamaModel.Trim(),
+            model,
             stream = false,
-            format = new
-            {
-                type = "object",
-                properties = new
-                {
-                    observation = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            screen_type = new { type = "string", @enum = Enum.GetNames<ScreenKind>() },
-                            summary = new { type = "string" },
-                            visible_text = new { type = "string" },
-                            confidence = new { type = "number", minimum = 0, maximum = 1 }
-                        },
-                        required = new[] { "screen_type", "summary", "visible_text", "confidence" }
-                    },
-                    outcome = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            kind = new { type = "string", @enum = Enum.GetNames<OutcomeKind>() },
-                            summary = new { type = "string" },
-                            meaningful_progress = new { type = "boolean" },
-                            confidence = new { type = "number", minimum = 0, maximum = 1 }
-                        },
-                        required = new[] { "kind", "summary", "meaningful_progress", "confidence" }
-                    },
-                    goal = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            description = new { type = "string" },
-                            keep_current = new { type = "boolean" },
-                            completed_current = new { type = "boolean" }
-                        },
-                        required = new[] { "description", "keep_current", "completed_current" }
-                    },
-                    task = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            description = new { type = "string" },
-                            success_condition = new { type = "string" },
-                            keep_current = new { type = "boolean" },
-                            completed_current = new { type = "boolean" },
-                            queued_tasks = new
-                            {
-                                type = "array",
-                                items = new { type = "string" },
-                                maxItems = 5
-                            }
-                        },
-                        required = new[]
-                        {
-                            "description", "success_condition", "keep_current", "completed_current", "queued_tasks"
-                        }
-                    },
-                    action = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            button = new { type = "string", @enum = Enum.GetNames<GbaButton>() },
-                            hold_ms = new { type = "integer", minimum = 16, maximum = 2000 },
-                            reasoning = new { type = "string" }
-                        },
-                        required = new[] { "button", "hold_ms", "reasoning" }
-                    },
-                    memories = new
-                    {
-                        type = "array",
-                        maxItems = 4,
-                        items = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                kind = new { type = "string", @enum = Enum.GetNames<MemoryKind>() },
-                                summary = new { type = "string" },
-                                confidence = new { type = "number", minimum = 0, maximum = 1 }
-                            },
-                            required = new[] { "kind", "summary", "confidence" }
-                        }
-                    }
-                },
-                required = new[] { "observation", "outcome", "goal", "task", "action", "memories" }
-            },
+            think = false,
+            format = BuildPlannerSchema(maxActions),
             messages = new object[]
             {
-                new { role = "system", content = SystemPrompt },
+                new { role = "system", content = PlannerSystemPrompt },
                 new
                 {
                     role = "user",
-                    content = BuildContextPrompt(context, history, previousScreenshotPng is not null),
-                    images = previousScreenshotPng is null
-                        ? new[] { Convert.ToBase64String(screenshotPng) }
-                        : new[]
-                        {
-                            Convert.ToBase64String(previousScreenshotPng),
-                            Convert.ToBase64String(screenshotPng)
-                        }
+                    content = BuildPlannerPrompt(
+                        perception,
+                        context,
+                        BuildHistory(recentHistory, Math.Min(settings.DecisionHistoryCount, profile.MaximumHistoryItems)),
+                        maxActions)
                 }
             },
-            options = new { temperature = 0.2 }
+            options = new
+            {
+                temperature = profile.Temperature,
+                num_ctx = profile.ContextSize,
+                num_predict = Math.Min(profile.MaximumResponseTokens, 800)
+            }
         };
 
-        using var response = await _http.PostAsJsonAsync(
-            BuildUrl(settings.OllamaBaseUri, "/api/chat"),
-            request,
-            cancellationToken);
+        var result = await SendAsync(model, profile.Name + " / planner", request, cancellationToken);
+        using var json = JsonDocument.Parse(result.Json);
+        var root = json.RootElement;
+        var outcome = root.GetProperty("outcome");
+        var goal = root.GetProperty("goal");
+        var task = root.GetProperty("task");
 
+        var turn = new CognitiveTurn(
+            perception.Observation,
+            new OutcomeAssessment(
+                ParseEnum(outcome, "kind", OutcomeKind.Unknown),
+                GetText(outcome, "summary", "Outcome unclear."),
+                GetBool(outcome, "meaningful_progress"),
+                GetConfidence(outcome, "confidence")),
+            new GoalProposal(
+                GetText(goal, "description", context.ActiveGoal),
+                GetBool(goal, "keep_current"),
+                GetBool(goal, "completed_current")),
+            new TaskProposal(
+                GetText(task, "description", context.ActiveTask),
+                GetText(task, "success_condition", "Visible state changes."),
+                GetBool(task, "keep_current"),
+                GetBool(task, "completed_current"),
+                ReadStrings(task, "queued_tasks", 5)),
+            ReadActions(root, maxActions),
+            ReadMemories(root),
+            CombineMetrics(perception.Metrics, result.Metrics));
+
+        return turn;
+    }
+
+    private async Task<OllamaResult> SendAsync(
+        string model,
+        string profile,
+        object request,
+        CancellationToken cancellationToken)
+    {
+        var settings = _settings.Current;
+        using var response = await _http.PostAsJsonAsync(
+            BuildUrl(settings.OllamaBaseUri, "/api/chat"), request, cancellationToken);
         var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
+        {
+            Console.Error.WriteLine(
+                $"[{DateTimeOffset.Now:O}] Ollama model '{model}' HTTP {(int)response.StatusCode} {response.StatusCode}\n{responseText}");
             throw new HttpRequestException(
-                $"Ollama returned {(int)response.StatusCode} {response.StatusCode}: {Trim(responseText, 400)}");
+                $"Ollama model '{model}' returned {(int)response.StatusCode} {response.StatusCode}: {Trim(responseText, 400)}");
+        }
 
         using var envelope = JsonDocument.Parse(responseText);
         if (!envelope.RootElement.TryGetProperty("message", out var message) ||
             !message.TryGetProperty("content", out var content))
-        {
             throw new InvalidDataException("Ollama's response did not contain message.content.");
-        }
 
-        var decisionJson = StripCodeFence(content.GetString() ?? string.Empty);
-        using var decision = JsonDocument.Parse(decisionJson);
-        var root = decision.RootElement;
-        var observationJson = root.GetProperty("observation");
-        var outcomeJson = root.GetProperty("outcome");
-        var goalJson = root.GetProperty("goal");
-        var taskJson = root.GetProperty("task");
-        var actionJson = root.GetProperty("action");
-
-        var buttonText = actionJson.GetProperty("button").GetString();
-        if (!Enum.TryParse<GbaButton>(buttonText, ignoreCase: true, out var button))
-            throw new InvalidDataException($"Ollama returned an unsupported button: {buttonText ?? "(null)"}.");
-
-        var holdMs = Math.Clamp(actionJson.GetProperty("hold_ms").GetInt32(), 16, 2_000);
-        var reasoning = actionJson.GetProperty("reasoning").GetString()?.Trim();
-        if (string.IsNullOrWhiteSpace(reasoning))
-            reasoning = $"Press {button}.";
-
-        var queuedTasks = taskJson.GetProperty("queued_tasks")
-            .EnumerateArray()
-            .Select(item => item.GetString()?.Trim() ?? "")
-            .Where(item => !string.IsNullOrWhiteSpace(item))
-            .Take(5)
-            .ToArray();
-
-        var memories = root.GetProperty("memories")
-            .EnumerateArray()
-            .Select(item => new MemoryCandidate(
-                ParseEnum(item, "kind", MemoryKind.Fact),
-                GetText(item, "summary", ""),
-                GetConfidence(item, "confidence")))
-            .Where(item => !string.IsNullOrWhiteSpace(item.Summary))
-            .Take(4)
-            .ToArray();
-
-        return new CognitiveTurn(
-            new Observation(
-                ParseEnum(observationJson, "screen_type", ScreenKind.Unknown),
-                GetText(observationJson, "summary", "Unable to identify the current screen."),
-                GetText(observationJson, "visible_text", ""),
-                GetConfidence(observationJson, "confidence")),
-            new OutcomeAssessment(
-                ParseEnum(outcomeJson, "kind", OutcomeKind.Unknown),
-                GetText(outcomeJson, "summary", "Outcome is not yet clear."),
-                outcomeJson.GetProperty("meaningful_progress").GetBoolean(),
-                GetConfidence(outcomeJson, "confidence")),
-            new GoalProposal(
-                GetText(goalJson, "description", context.ActiveGoal),
-                goalJson.GetProperty("keep_current").GetBoolean(),
-                goalJson.GetProperty("completed_current").GetBoolean()),
-            new TaskProposal(
-                GetText(taskJson, "description", context.ActiveTask),
-                GetText(taskJson, "success_condition", "The visible game state meaningfully changes."),
-                taskJson.GetProperty("keep_current").GetBoolean(),
-                taskJson.GetProperty("completed_current").GetBoolean(),
-                queuedTasks),
-            new AgentDecision(button, holdMs, reasoning),
-            memories);
+        var json = StripCodeFence(content.GetString() ?? "");
+        // Validate before returning so malformed responses fail in this stage.
+        using var _ = JsonDocument.Parse(json);
+        return new OllamaResult(json, ReadMetrics(envelope.RootElement, model, profile, json));
     }
 
-    private static string BuildContextPrompt(AgentContext context, string history, bool hasPreviousFrame)
+    private static object BuildPerceptionSchema() => new
+    {
+        type = "object",
+        properties = new
+        {
+            screen_type = new { type = "string", @enum = Enum.GetNames<ScreenKind>() },
+            summary = new { type = "string" },
+            visible_text = new { type = "string" },
+            confidence = new { type = "number", minimum = 0, maximum = 1 },
+            dialogue_complete = new { type = "boolean" },
+            change_summary = new { type = "string" }
+        },
+        required = new[]
+        {
+            "screen_type", "summary", "visible_text", "confidence", "dialogue_complete", "change_summary"
+        }
+    };
+
+    private static object BuildPlannerSchema(int maxActions)
+    {
+        var action = new
+        {
+            type = "object",
+            properties = new
+            {
+                button = new { type = "string", @enum = Enum.GetNames<GbaButton>() },
+                hold_ms = new { type = "integer", minimum = 16, maximum = 2000 },
+                reasoning = new { type = "string" }
+            },
+            required = new[] { "button", "hold_ms", "reasoning" }
+        };
+        var memory = new
+        {
+            type = "object",
+            properties = new
+            {
+                kind = new { type = "string", @enum = Enum.GetNames<MemoryKind>() },
+                summary = new { type = "string" },
+                confidence = new { type = "number", minimum = 0, maximum = 1 }
+            },
+            required = new[] { "kind", "summary", "confidence" }
+        };
+
+        return new
+        {
+            type = "object",
+            properties = new
+            {
+                outcome = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        kind = new { type = "string", @enum = Enum.GetNames<OutcomeKind>() },
+                        summary = new { type = "string" },
+                        meaningful_progress = new { type = "boolean" },
+                        confidence = new { type = "number", minimum = 0, maximum = 1 }
+                    },
+                    required = new[] { "kind", "summary", "meaningful_progress", "confidence" }
+                },
+                goal = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        description = new { type = "string" },
+                        keep_current = new { type = "boolean" },
+                        completed_current = new { type = "boolean" }
+                    },
+                    required = new[] { "description", "keep_current", "completed_current" }
+                },
+                task = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        description = new { type = "string" },
+                        success_condition = new { type = "string" },
+                        keep_current = new { type = "boolean" },
+                        completed_current = new { type = "boolean" },
+                        queued_tasks = new { type = "array", maxItems = 5, items = new { type = "string" } }
+                    },
+                    required = new[]
+                    {
+                        "description", "success_condition", "keep_current", "completed_current", "queued_tasks"
+                    }
+                },
+                actions = new { type = "array", minItems = 1, maxItems = maxActions, items = action },
+                memories = new { type = "array", maxItems = 4, items = memory }
+            },
+            required = new[] { "outcome", "goal", "task", "actions", "memories" }
+        };
+    }
+
+    private static string BuildPlannerPrompt(
+        PerceptionSnapshot p,
+        AgentContext c,
+        string history,
+        int maxActions)
     {
         static string Lines(IReadOnlyList<string> values) =>
-            values.Count == 0 ? "(none)" : string.Join("\n", values.Select(value => "- " + value));
+            values.Count == 0 ? "(none)" : string.Join("\n", values.Select(v => "- " + v));
 
         return $"""
-            ROOT GOAL (do not silently replace): {context.RootGoal}
-            ACTIVE GOAL: {context.ActiveGoal}
-            ACTIVE TASK: {context.ActiveTask}
+            PERCEPTION (authoritative):
+            screen_type={p.Observation.ScreenType}
+            summary={p.Observation.Summary}
+            visible_text={p.Observation.VisibleText}
+            confidence={p.Observation.Confidence:0.00}
+            capture_stable={p.ScreenStable}
+            dialogue_complete={p.DialogueComplete}
+            temporal_change={p.ChangeSummary}
+
+            ROOT GOAL: {c.RootGoal}
+            ACTIVE GOAL: {c.ActiveGoal}
+            ACTIVE TASK: {c.ActiveTask}
             QUEUED TASKS:
-            {Lines(context.QueuedTasks)}
+            {Lines(c.QueuedTasks)}
 
             GAME PROFILE:
-            {context.ProfilePrompt}
-
+            {c.ProfilePrompt}
             RELEVANT KNOWLEDGE:
-            {Lines(context.RelevantKnowledge)}
+            {Lines(c.RelevantKnowledge)}
+            TRUSTED MEMORIES:
+            {Lines(c.RelevantMemories)}
 
-            RELEVANT LONG-TERM MEMORIES:
-            {Lines(context.RelevantMemories)}
-
-            VISUAL SIGNAL: frame_changed={context.FrameChanged}; stuck_count={context.StuckCount}
-            IMAGE ORDER: {(hasPreviousFrame ? "first image is the previous frame; second image is the current frame" : "only the current frame is attached")}
-            RECENT ACTIONS (newest first):
+            PROGRESS SIGNAL: frame_changed={c.FrameChanged}; stuck_count={c.StuckCount}
+            RECENT INPUTS (newest first):
             {history}
 
-            Evaluate the attached current frame. Preserve a useful goal/task when still valid; revise it when completed,
-            disproven, blocked, or repeatedly failing. Choose one next GBA input.
+            Return 1 to {maxActions} actions. If dialogue_complete=false, normally choose WAIT so perception
+            can observe another frame. WAIT hold_ms is how long to observe before the next turn. Queue multiple
+            inputs only for an atomic combo or deterministic menu sequence; otherwise stop after one input.
             """;
     }
 
-    private static TEnum ParseEnum<TEnum>(JsonElement parent, string property, TEnum fallback)
-        where TEnum : struct, Enum =>
-        Enum.TryParse<TEnum>(parent.GetProperty(property).GetString(), true, out var value)
-            ? value
-            : fallback;
+    private static IReadOnlyList<AgentDecision> ReadActions(JsonElement root, int maximum) =>
+        root.TryGetProperty("actions", out var values) && values.ValueKind == JsonValueKind.Array
+            ? values.EnumerateArray().Take(maximum).Select(item =>
+            {
+                var button = ParseEnum(item, "button", GbaButton.Wait);
+                return new AgentDecision(
+                    button,
+                    Math.Clamp(GetInt(item, "hold_ms", button == GbaButton.Wait ? 250 : 80), 16, 2000),
+                    GetText(item, "reasoning", button == GbaButton.Wait ? "Observe another frame." : $"Press {button}."));
+            }).ToArray()
+            : [new AgentDecision(GbaButton.Wait, 250, "Observe another frame because the planner returned no action.")];
 
-    private static string GetText(JsonElement parent, string property, string fallback)
+    private static IReadOnlyList<MemoryCandidate> ReadMemories(JsonElement root) =>
+        root.TryGetProperty("memories", out var values) && values.ValueKind == JsonValueKind.Array
+            ? values.EnumerateArray().Take(4)
+                .Select(item => new MemoryCandidate(
+                    ParseEnum(item, "kind", MemoryKind.Fact),
+                    GetText(item, "summary", ""),
+                    GetConfidence(item, "confidence")))
+                .Where(item => item.Summary.Length > 0)
+                .ToArray()
+            : [];
+
+    private static InferenceMetrics CombineMetrics(InferenceMetrics perception, InferenceMetrics planner)
     {
-        var value = parent.GetProperty(property).GetString()?.Trim();
-        return string.IsNullOrWhiteSpace(value) ? fallback : Trim(value, 1_000);
+        var evalMs = perception.EvalDurationMs + planner.EvalDurationMs;
+        var evalCount = perception.EvalCount + planner.EvalCount;
+        return new InferenceMetrics(
+            $"{perception.Model} → {planner.Model}",
+            $"{perception.CompatibilityProfile} → {planner.CompatibilityProfile}",
+            perception.TotalDurationMs + planner.TotalDurationMs,
+            perception.LoadDurationMs + planner.LoadDurationMs,
+            perception.PromptEvalCount + planner.PromptEvalCount,
+            perception.PromptEvalDurationMs + planner.PromptEvalDurationMs,
+            evalCount,
+            evalMs,
+            evalMs > 0 ? evalCount / (evalMs / 1000d) : 0,
+            $"PERCEPTION\n{perception.RawResponse}\n\nPLANNER\n{planner.RawResponse}");
     }
 
-    private static double GetConfidence(JsonElement parent, string property) =>
-        Math.Clamp(parent.GetProperty(property).GetDouble(), 0, 1);
-
-    private static string BuildHistory(IReadOnlyList<DecisionLogEntry> history, int requestedCount)
+    private static InferenceMetrics ReadMetrics(JsonElement root, string model, string profile, string raw)
     {
-        var count = Math.Clamp(requestedCount, 0, 30);
-        if (count == 0 || history.Count == 0)
+        var total = NsToMs(GetLong(root, "total_duration"));
+        var load = NsToMs(GetLong(root, "load_duration"));
+        var promptCount = GetLong(root, "prompt_eval_count");
+        var promptMs = NsToMs(GetLong(root, "prompt_eval_duration"));
+        var evalCount = GetLong(root, "eval_count");
+        var evalMs = NsToMs(GetLong(root, "eval_duration"));
+        return new InferenceMetrics(
+            model,
+            profile,
+            total,
+            load,
+            promptCount,
+            promptMs,
+            evalCount,
+            evalMs,
+            evalMs > 0 ? evalCount / (evalMs / 1000d) : 0,
+            Trim(raw, 16_000));
+    }
+
+    private static string ResolvePerceptionModel(AppSettings settings) =>
+        FirstNonEmpty(settings.OllamaPerceptionModel, settings.OllamaModel);
+
+    private static string ResolvePlannerModel(AppSettings settings) =>
+        FirstNonEmpty(settings.OllamaPlannerModel, settings.OllamaModel);
+
+    private static string FirstNonEmpty(params string?[] values)
+    {
+        var value = values.Select(x => x?.Trim() ?? "").FirstOrDefault(x => x.Length > 0);
+        if (string.IsNullOrWhiteSpace(value))
+            throw new InvalidOperationException("Choose an Ollama model in Settings.");
+        return value;
+    }
+
+    private static T ParseEnum<T>(JsonElement p, string n, T fallback) where T : struct, Enum =>
+        p.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String &&
+        Enum.TryParse<T>(v.GetString(), true, out var parsed) ? parsed : fallback;
+
+    private static string GetText(JsonElement p, string n, string fallback) =>
+        p.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
+            ? Trim(v.GetString()!.Trim(), 1000)
+            : fallback;
+
+    private static double GetConfidence(JsonElement p, string n) =>
+        p.TryGetProperty(n, out var v) && v.TryGetDouble(out var value) ? Math.Clamp(value, 0, 1) : 0;
+
+    private static bool GetBool(JsonElement p, string n) =>
+        p.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.True;
+
+    private static int GetInt(JsonElement p, string n, int fallback) =>
+        p.TryGetProperty(n, out var v) && v.TryGetInt32(out var value) ? value : fallback;
+
+    private static long GetLong(JsonElement p, string n) =>
+        p.TryGetProperty(n, out var v) && v.TryGetInt64(out var value) ? value : 0;
+
+    private static double NsToMs(long ns) => ns / 1_000_000d;
+
+    private static string[] ReadStrings(JsonElement p, string n, int max) =>
+        p.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(x => x.GetString()?.Trim() ?? "").Where(x => x.Length > 0).Take(max).ToArray()
+            : [];
+
+    private static string BuildHistory(IReadOnlyList<DecisionLogEntry> history, int count)
+    {
+        if (count <= 0 || history.Count == 0)
             return "(none)";
-
-        var builder = new StringBuilder();
-        for (var index = 0; index < Math.Min(count, history.Count); index++)
-        {
-            var item = history[index];
-            builder.Append("- ")
-                .Append(item.ButtonText)
-                .Append(" for ")
-                .Append(item.HoldMs)
-                .Append(" ms: ")
+        var b = new StringBuilder();
+        foreach (var item in history.Take(Math.Clamp(count, 0, 30)))
+            b.Append("- ").Append(item.ButtonText).Append(" for ").Append(item.HoldMs).Append(" ms: ")
                 .AppendLine(Trim(item.Reasoning.ReplaceLineEndings(" "), 160));
-        }
-
-        return builder.ToString();
+        return b.ToString();
     }
 
     private static string BuildUrl(string baseUrl, string path)
@@ -300,25 +455,22 @@ public sealed class OllamaAgent : IOllamaAgent, IDisposable
         baseUrl = baseUrl.TrimEnd('/');
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out _))
             throw new InvalidOperationException("The Ollama URL in Settings is invalid.");
-
         return baseUrl + path;
     }
 
     private static string StripCodeFence(string value)
     {
-        var trimmed = value.Trim();
-        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
-            return trimmed;
-
-        var firstLineEnd = trimmed.IndexOf('\n');
-        var lastFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
-        return firstLineEnd >= 0 && lastFence > firstLineEnd
-            ? trimmed[(firstLineEnd + 1)..lastFence].Trim()
-            : trimmed;
+        var s = value.Trim();
+        if (!s.StartsWith("```", StringComparison.Ordinal))
+            return s;
+        var first = s.IndexOf('\n');
+        var last = s.LastIndexOf("```", StringComparison.Ordinal);
+        return first >= 0 && last > first ? s[(first + 1)..last].Trim() : s;
     }
 
-    private static string Trim(string value, int maximumLength) =>
-        value.Length <= maximumLength ? value : value[..maximumLength] + "…";
+    private static string Trim(string value, int max) => value.Length <= max ? value : value[..max] + "…";
 
     public void Dispose() => _http.Dispose();
+
+    private sealed record OllamaResult(string Json, InferenceMetrics Metrics);
 }

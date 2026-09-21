@@ -24,7 +24,7 @@
       <TextBlock Text="Emulator" FontSize="18" FontWeight="SemiBold"/>
 
       <Grid ColumnDefinitions="160,*,Auto,Auto">
-        <TextBlock Grid.Column="0" Text="mGBA AppImage" Classes="label"/>
+        <TextBlock Grid.Column="0" Text="mGBA executable" Classes="label"/>
         <TextBox   Grid.Column="1" Text="{Binding MgbaBinaryPath}"/>
         <Button    Grid.Column="2" Content="Browse…" Command="{Binding BrowseMgbaBinaryCommand}" Margin="6,0"/>
         <Button    Grid.Column="3" Content="Test"    Command="{Binding TestMgbaBinaryCommand}"/>
@@ -66,9 +66,23 @@
       <TextBlock Text="{Binding OllamaStatus}" Classes="status"/>
 
       <Grid ColumnDefinitions="160,*">
-        <TextBlock Grid.Column="0" Text="Model" Classes="label"/>
+        <TextBlock Grid.Column="0" Text="Fallback model" Classes="label"/>
         <TextBox   Grid.Column="1" Text="{Binding OllamaModel}"/>
       </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Vision model" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding PerceptionModel}"
+                   PlaceholderText="Blank = fallback model"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Planner model" Classes="label"/>
+        <TextBox   Grid.Column="1" Text="{Binding PlannerModel}"
+                   PlaceholderText="Blank = fallback model"/>
+      </Grid>
+      <TextBlock Text="{Binding ModelCompatibilityText}" Classes="status"/>
+
 
       <Grid ColumnDefinitions="160,*">
         <TextBlock Grid.Column="0" Text="Session goal" Classes="label"
@@ -98,15 +112,59 @@
                        Minimum="100" Maximum="10000" Increment="100"/>
       </Grid>
 
+      <TextBlock Text="Perception loop" FontSize="15" FontWeight="SemiBold" Margin="0,8,0,0"/>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Frames / perception" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding PerceptionFrameCount}"
+                       Minimum="1" Maximum="4" Increment="1"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Capture spacing (ms)" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding StableFrameCaptureDelayMs}"
+                       Minimum="50" Maximum="1000" Increment="10"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Stable matches" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding StableFrameMatchCount}"
+                       Minimum="1" Maximum="10" Increment="1"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Stability timeout (ms)" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding StableFrameTimeoutMs}"
+                       Minimum="250" Maximum="10000" Increment="250"/>
+      </Grid>
+
       <Grid ColumnDefinitions="160,*">
         <TextBlock Grid.Column="0" Text="Actions remembered" Classes="label"/>
         <NumericUpDown Grid.Column="1" Value="{Binding DecisionHistoryCount}"
                        Minimum="0" Maximum="30" Increment="1"/>
       </Grid>
 
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Max actions / turn" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding MaxActionsPerTurn}"
+                       Minimum="1" Maximum="4" Increment="1"/>
+      </Grid>
+
       <Separator Margin="0,12"/>
 
       <TextBlock Text="Memory" FontSize="18" FontWeight="SemiBold"/>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Candidate threshold" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding MemoryCandidateThreshold}"
+                       Minimum="0" Maximum="1" Increment="0.05" FormatString="0.00"/>
+      </Grid>
+
+      <Grid ColumnDefinitions="160,*">
+        <TextBlock Grid.Column="0" Text="Prompt score threshold" Classes="label"/>
+        <NumericUpDown Grid.Column="1" Value="{Binding MemoryPromptThreshold}"
+                       Minimum="0" Maximum="2" Increment="0.05" FormatString="0.00"/>
+      </Grid>
 
       <Grid ColumnDefinitions="160,*,Auto">
         <TextBlock Grid.Column="0" Text="Neo4j URI" Classes="label"/>

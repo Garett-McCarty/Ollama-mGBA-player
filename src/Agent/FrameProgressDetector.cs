@@ -29,6 +29,9 @@ public sealed class FrameProgressDetector
 
     public void RecordAction(GbaButton button)
     {
+        if (button == GbaButton.Wait)
+            return;
+
         _repeatedButtons = _lastButton == button ? _repeatedButtons + 1 : 0;
         _lastButton = button;
     }

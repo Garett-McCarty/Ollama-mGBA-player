@@ -7,6 +7,7 @@ using OllamaNetGB.Agent;
 using OllamaNetGB.Config;
 using OllamaNetGB.Emulator;
 using OllamaNetGB.Memory;
+using OllamaNetGB.Metrics;
 using OllamaNetGB.Profiles;
 using OllamaNetGB.Services;
 using OllamaNetGB.Views;
@@ -38,8 +39,9 @@ public partial class App : Application
             var memory = new Neo4jAgentMemory(settings);
             var profiles = new JsonGameProfileProvider();
             var coordinator = new AgentCoordinator(ollama, memory, profiles, settings);
+            var metrics = new SqliteRunMetricsStore(settings);
             var settingsViewModel = new SettingsViewModel(settings, filePicker);
-            var gameViewModel = new GameViewModel(mgba, coordinator, settings);
+            var gameViewModel = new GameViewModel(mgba, coordinator, settings, metrics);
             var mainViewModel = new MainWindowViewModel(settingsViewModel, gameViewModel);
 
             var mainWindow = new MainWindow

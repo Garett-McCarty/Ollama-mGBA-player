@@ -1,3 +1,5 @@
+using CommunityToolkit.Mvvm.ComponentModel;
+
 namespace OllamaNetGB.Models;
 
 public enum ScreenKind
@@ -36,6 +38,23 @@ public enum MemoryKind
     Warning
 }
 
+public enum MemoryState
+{
+    Candidate,
+    Confirmed,
+    Trusted,
+    Pinned,
+    Rejected
+}
+
+
+public sealed record PerceptionSnapshot(
+    Observation Observation,
+    bool ScreenStable,
+    bool DialogueComplete,
+    string ChangeSummary,
+    InferenceMetrics Metrics);
+
 public sealed record Observation(
     ScreenKind ScreenType,
     string Summary,
@@ -70,8 +89,30 @@ public sealed record CognitiveTurn(
     OutcomeAssessment Outcome,
     GoalProposal Goal,
     TaskProposal Task,
-    AgentDecision Action,
-    IReadOnlyList<MemoryCandidate> Memories);
+    IReadOnlyList<AgentDecision> Actions,
+    IReadOnlyList<MemoryCandidate> Memories,
+    InferenceMetrics Metrics)
+{
+    public AgentDecision Action => Actions.Count > 0
+        ? Actions[0]
+        : new AgentDecision(GbaButton.Wait, 250, "Wait because the model returned no actions.");
+}
+
+public sealed record InferenceMetrics(
+    string Model,
+    string CompatibilityProfile,
+    double TotalDurationMs,
+    double LoadDurationMs,
+    long PromptEvalCount,
+    double PromptEvalDurationMs,
+    long EvalCount,
+    double EvalDurationMs,
+    double TokensPerSecond,
+    string RawResponse)
+{
+    public static InferenceMetrics Empty(string model = "unknown") =>
+        new(model, "unknown", 0, 0, 0, 0, 0, 0, 0, "");
+}
 
 public sealed record AgentContext(
     string RootGoal,
@@ -86,15 +127,46 @@ public sealed record AgentContext(
 
 public sealed record AgentTaskItem(string Description, string Status);
 
-public sealed record MemoryDisplayItem(
-    string Kind,
-    string Summary,
-    string ConfidenceText);
+public partial class MemoryDisplayItem : ObservableObject
+{
+    public MemoryDisplayItem(
+        MemoryKind kind,
+        string summary,
+        double confidence,
+        double weight,
+        MemoryState state,
+        long confirmationCount)
+    {
+        Kind = kind;
+        Summary = summary;
+        Confidence = confidence;
+        _weight = weight;
+        State = state;
+        ConfirmationCount = confirmationCount;
+    }
+
+    public MemoryKind Kind { get; }
+    public string Summary { get; }
+    public double Confidence { get; }
+    public MemoryState State { get; }
+    public long ConfirmationCount { get; }
+    public string ConfidenceText => $"{Confidence:P0}";
+    public string StateText => $"{State} · {ConfirmationCount} confirmation{(ConfirmationCount == 1 ? "" : "s")}";
+    public string EffectiveConfidenceText => $"Effective {Math.Clamp(Confidence * Weight, 0, 2):P0}";
+
+    [ObservableProperty]
+    private double _weight;
+
+    partial void OnWeightChanged(double value) =>
+        OnPropertyChanged(nameof(EffectiveConfidenceText));
+}
 
 public sealed record CoordinatorTurnResult(
     CognitiveTurn Turn,
+    PerceptionSnapshot Perception,
     string ActiveGoal,
     string ActiveTask,
     IReadOnlyList<AgentTaskItem> Tasks,
     IReadOnlyList<MemoryDisplayItem> Memories,
-    int StuckCount);
+    int StuckCount,
+    bool FrameChanged);
